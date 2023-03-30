@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 
 thr = 50
-minArea = 20
+minArea = 150
 allViews = False
 kernel = np.ones((5,5),np.uint8)
 
@@ -24,6 +24,8 @@ for fid in frameIds:
  
 # Calculate the median of the images -> background
 img_bg = np.median(frames, axis=0).astype(dtype=np.uint8)   
+if allViews:
+    cv2.imshow('Background', img_bg)
 
 # Set cap back to start
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -39,6 +41,7 @@ while cap.isOpened():
     img_gt = img.copy()
     for i, bbox in gt.iterrows():    
         cv2.rectangle(img_gt, (int(bbox[2]), int(bbox[3])), (int(bbox[2]+bbox[4]), int(bbox[3]+bbox[5])), (255,0,0), 1)
+        cv2.putText(img_gt, str(int(bbox[1])), (int(bbox[2]), int(bbox[3]-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
     cv2.imshow('Ground truths', img_gt)
 
     # 2) OBJECT DETECTION
@@ -64,7 +67,7 @@ while cap.isOpened():
         cv2.imshow("Applied opening", img_opn)
 
     # Running CCA alg - using connectivity 8
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(img_opn, connectivity=4) 
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(img_opn, connectivity=4) 
 
     # Filter labels and their stats with minArea param
     filtered_labels = np.where(np.isin(labels, np.where(stats[:, cv2.CC_STAT_AREA] >= minArea)[0]), labels, 0)
@@ -76,18 +79,22 @@ while cap.isOpened():
         cv2.imshow('Filtered labels', colored_label_image)
 
     # Creating bounding boxes from labels stats
-    result = img.copy()
-    for lab in filtered_label_stats:
+    img_detect = img.copy()
+    for i, lab in enumerate(filtered_label_stats):
         if lab == 0:  # Skip the background
             continue
         x = stats[lab, cv2.CC_STAT_LEFT]
         y = stats[lab, cv2.CC_STAT_TOP]
         w = stats[lab, cv2.CC_STAT_WIDTH]
         h = stats[lab, cv2.CC_STAT_HEIGHT]        
-        cv2.rectangle(result, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.rectangle(img_detect, (x, y), (x + w, y + h), (0, 255, 0), 1)
+        cv2.putText(img_detect, str(i+1), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
 
-    cv2.imshow('Result', result)       
-        
+    cv2.imshow('Detected objects', img_detect)       
+
+    # 3) OBJECT TRACKING 
+    
+
     #####################################
     frame += 1
     # Wait for a key press to exit
