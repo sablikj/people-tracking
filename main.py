@@ -2,13 +2,14 @@ import cv2
 import math
 import pandas as pd
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 show_gt = False
 
 minIOU = 0.3
 thr = 50 # Used for background subtraction
 minArea = 175 # Minimal area to be considered a component
-maxDistance = 25  # Maximal distance between frames of each person | Also mean width of bbbox in these frames
+maxDistance = 25 #Centroid:25  # Maximal distance between frames of each person
 allViews = False
 kernel = np.ones((5,5),np.uint8) # Used for orphological operations
 
@@ -197,16 +198,17 @@ def compute_distance(descriptor, track_desc, pos, track_bbox):
         float: The distance between the pedestrian and the track.
     """
     # Euclidean distance between the descriptor of the pedestrian and the descriptor of the track
-    #desc_dist = np.linalg.norm(descriptor - track_desc)
+    desc_dist = np.linalg.norm(track_desc-descriptor)
+    print(desc_dist)
     # Euclidean distance between the position of the pedestrian and the position of the track
     c1 = getCentroid(pos)
     c2 = getCentroid(track_bbox)
     pos_dist = np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
     
     # Total distance with added weights
-    #dist = desc_dist + pos_dist
+    dist = desc_dist + pos_dist
 
-    return pos_dist
+    return pos_dist    
 
 
 ############################################################################################
@@ -245,9 +247,10 @@ while cap.isOpened():
     filtered_label_stats = np.where(stats[:, cv2.CC_STAT_AREA] >= minArea)[0]
     
     img_detect = img.copy()
-    # Initialize a list to store the pedestrian information in the current frame
-    current_frame = []
+    # Initialize an empty list to store the detections
+    detections = []
 
+    # Iterating in detected pedestrians
     for i, lab in enumerate(filtered_label_stats):
         if lab == 0:  # Skip the background
             continue
@@ -257,79 +260,68 @@ while cap.isOpened():
         h = stats[lab, cv2.CC_STAT_HEIGHT]
 
         centroid = (int(x+(w/2)), int(y+(h/2)))       
- 
-        # Frame, ID, bbLeft, bbTop, Width, Height, Confidence,x,y,z
-        #data.append([frame, id, x, y, w, h, 0, 0, 0, 0])                 
-        ##############################
-        # TRACKING
+
+        # Frame, ID, bbLeft, bbTop, Width, Height, Confidence, x, y, z
+        data.append([frame, id, x, y, w, h, 0, 0, 0, 0])                 
+
+        # Compute the descriptor of the pedestrian
+        descriptor = cv2.calcHist([img[x:x+w, y:y+h]], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
+        # Normalize histogram
+        descriptor = cv2.normalize(descriptor, descriptor).flatten()
+
+        # Add the pedestrian information to the detections list
+        detections.append({'bbox': (x, y, w, h), 'descriptor': descriptor, 'centroid': centroid})
         
-        # Predicting position using optical flow
-        if(frame > 1):
-            roi = x,y,w,h
-            
-            # Compute the descriptor of the pedestrian
-            #descriptor = cv2.calcHist([img[x:x+w, y:y+h]], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-            descriptor = None
-            # Initialize variables for tracking
-            matched_track = None  # The track that matches the current pedestrian
-            min_distance = float('inf')  # The minimum distance between the current pedestrian and any track
-            predicted_pos = None  # The predicted position of the current pedestrian based on the motion model of the track
-            maxIOU = 0.0
-            # Try to match the current pedestrian with a track
-            for track in tracks:
-                # Predict the position of the track in the current frame
-                predicted_pos = predictPosition(prev_frame, img, track['bbox'])                
-                
-                # Compute the distance between the current pedestrian and the track
-                distance = compute_distance(descriptor, track['descriptor'], roi, track['bbox'])
-                #iou = compute_iou(track['bbox'], roi)
+        # If it's not the first frame, associate tracks and detections using the Hungarian algorithm
+        if frame > 1:
+            cost_matrix = np.zeros((len(tracks), len(detections)))
 
-                                
-                # Update the closest track                
-                if distance < min_distance:
-                    matched_track = track
-                    min_distance = distance                  
-                    #maxIOU = iou
+            for t, track in enumerate(tracks):
+                for d, det in enumerate(detections):
+                    distance = compute_distance(det['descriptor'], track['descriptor'], det['bbox'], track['bbox'])
+                    cost_matrix[t, d] = distance
 
-            if matched_track is not None and min_distance < maxDistance:                
-                # Update the matched track with the current pedestrian
-                update_track(matched_track, x, y, w, h, descriptor, centroid)                
-            else:
-                # Add a new track for the current pedestrian
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+            for r, c in zip(row_ind, col_ind):
+                if cost_matrix[r, c] < maxDistance:
+                    update_track(tracks[r], detections[c]['bbox'][0], detections[c]['bbox'][1], detections[c]['bbox'][2], detections[c]['bbox'][3], detections[c]['descriptor'], detections[c]['centroid'])
+                else:
+                    # Add a new track for the current pedestrian
+                    track = {'id': next_id,
+                            'bbox': (detections[c]['bbox'][0], detections[c]['bbox'][1], detections[c]['bbox'][2], detections[c]['bbox'][3]),
+                            'descriptor': detections[c]['descriptor'],
+                            'centroid': detections[c]['centroid'],
+                            'velocity': (0, 0),
+                            'lost_frames': 0}
+                    tracks.append(track)
+                    next_id += 1
+        else:
+            # Initialize tracks with the detected pedestrians in the first frame
+            for det in detections:
                 track = {'id': next_id,
-                        'bbox': (x, y, w, h),
-                        'descriptor': descriptor,
-                        'centroid': centroid,
+                        'bbox': det['bbox'],
+                        'descriptor': det['descriptor'],
+                        'centroid': det['centroid'],
                         'velocity': (0, 0),
                         'lost_frames': 0}
                 tracks.append(track)
                 next_id += 1
-            
-            # Add the pedestrian information to the current frame list
-            current_frame.append({'bbox': (x, y, w, h), 'descriptor': descriptor, 'centroid': centroid})
 
     # Update the lost tracks
-    # How many frames have elapsed since the last time a track was successfully matched with a pedestrian.
     if(frame > 1):
         for track in tracks:
             if track['lost_frames'] > max_lost_frames:
                 tracks.remove(track)
             else:
                 track['lost_frames'] += 1
-            
+
         # Show the current frame with the tracks
-        
         for track in tracks:
             x, y, w, h = track['bbox']
             cv2.rectangle(img_track, (x, y), (x+w, y+h), (0, 255, 0), 1)
             cv2.putText(img_track, f"{track['id']}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         cv2.imshow('Tracked image', img_track)
-
-    #############################
-    #     cv2.rectangle(img_detect, (x,y), (x+w, y+h), (0, 255, 0), 1)
-    #     cv2.putText(img_detect, str(i+1), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
-    #     cv2.circle(img_detect, centroid, 3, (0,255,0), -1)            
-    # cv2.imshow('Detected objects', img_detect)    
         
          
     #####################################
