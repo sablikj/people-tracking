@@ -8,14 +8,14 @@ show_gt = False
 minIOU = 0.3
 thr = 50 # Used for background subtraction
 minArea = 175 # Minimal area to be considered a component
-maxDistance = 750  # Maximal distance between frames of each person | Also mean width of bbbox in these frames
+maxDistance = 25  # Maximal distance between frames of each person | Also mean width of bbbox in these frames
 allViews = False
 kernel = np.ones((5,5),np.uint8) # Used for orphological operations
 
 # Initialize variables for tracking
 tracks = []  # List of tracks, each track is a dict containing the ID, bounding box, and descriptor of a pedestrian
 next_id = 1  # ID to assign to the next detected pedestrian
-max_lost_frames = 15  # Maximum number of frames a track can be lost before it is removed
+max_lost_frames = 5  # Maximum number of frames a track can be lost before it is removed
 
 
 id = 1 # ID of detected person
@@ -103,7 +103,7 @@ def predictPosition(prev, curr, roi):
     curr = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 
     # Apply an optical flow algorithm to calculate the motion vectors
-    flow = cv2.calcOpticalFlowFarneback(prev, curr, None, 0.5, 2, 7, 2, 5, 1.1, 0)
+    flow = cv2.calcOpticalFlowFarneback(prev, curr, None, 0.5, 2, 15, 2, 5, 1.1, 0)
 
     # Track the ROI using optical flow
     new_x = x + int(round(flow[y:y+h, x:x+w, 0].mean()))
@@ -197,16 +197,16 @@ def compute_distance(descriptor, track_desc, pos, track_bbox):
         float: The distance between the pedestrian and the track.
     """
     # Euclidean distance between the descriptor of the pedestrian and the descriptor of the track
-    desc_dist = np.linalg.norm(descriptor - track_desc)
+    #desc_dist = np.linalg.norm(descriptor - track_desc)
     # Euclidean distance between the position of the pedestrian and the position of the track
     c1 = getCentroid(pos)
     c2 = getCentroid(track_bbox)
     pos_dist = np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
     
     # Total distance with added weights
-    dist = desc_dist + pos_dist
+    #dist = desc_dist + pos_dist
 
-    return dist
+    return pos_dist
 
 
 ############################################################################################
@@ -262,14 +262,14 @@ while cap.isOpened():
         #data.append([frame, id, x, y, w, h, 0, 0, 0, 0])                 
         ##############################
         # TRACKING
-
+        
         # Predicting position using optical flow
         if(frame > 1):
             roi = x,y,w,h
             
             # Compute the descriptor of the pedestrian
-            descriptor = cv2.calcHist([img[x:x+w, y:y+h]], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-            #descriptor = None
+            #descriptor = cv2.calcHist([img[x:x+w, y:y+h]], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
+            descriptor = None
             # Initialize variables for tracking
             matched_track = None  # The track that matches the current pedestrian
             min_distance = float('inf')  # The minimum distance between the current pedestrian and any track
@@ -278,18 +278,19 @@ while cap.isOpened():
             # Try to match the current pedestrian with a track
             for track in tracks:
                 # Predict the position of the track in the current frame
-                #predicted_pos = predictPosition(prev_frame, img, track['bbox'])                
+                predicted_pos = predictPosition(prev_frame, img, track['bbox'])                
                 
                 # Compute the distance between the current pedestrian and the track
                 distance = compute_distance(descriptor, track['descriptor'], roi, track['bbox'])
                 #iou = compute_iou(track['bbox'], roi)
-                
+
+                                
                 # Update the closest track                
                 if distance < min_distance:
                     matched_track = track
                     min_distance = distance                  
                     #maxIOU = iou
-            
+
             if matched_track is not None and min_distance < maxDistance:                
                 # Update the matched track with the current pedestrian
                 update_track(matched_track, x, y, w, h, descriptor, centroid)                
