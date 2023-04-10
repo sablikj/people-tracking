@@ -3,14 +3,20 @@ import math
 import pandas as pd
 import numpy as np
 
-tracking = True
 show_gt = False
 
+minIOU = 0.3
 thr = 50 # Used for background subtraction
 minArea = 175 # Minimal area to be considered a component
-maxDistance = 30 # Maximal distance between frames of each person | Also mean width of bbbox in these frames
-allViews = True
+maxDistance = 750  # Maximal distance between frames of each person | Also mean width of bbbox in these frames
+allViews = False
 kernel = np.ones((5,5),np.uint8) # Used for orphological operations
+
+# Initialize variables for tracking
+tracks = []  # List of tracks, each track is a dict containing the ID, bounding box, and descriptor of a pedestrian
+next_id = 1  # ID to assign to the next detected pedestrian
+max_lost_frames = 15  # Maximum number of frames a track can be lost before it is removed
+
 
 id = 1 # ID of detected person
 frame = 1 # Number of current frame
@@ -25,11 +31,11 @@ def getBackground(cap, n=25):
     """
     Takes 'n' image samples to create background image using median.
     
-    Parameters:
+    Args:
         cap (cv2.VideoCapture): A VideoCapture object containing sequence of frames.
     
     Returns:
-        bg (np.array): Created background image.
+        np.array: Created background image.
     """
     # Randomly select 25 frames
     frameIds = cap.get(cv2.CAP_PROP_FRAME_COUNT) * np.random.uniform(size=n)
@@ -53,12 +59,12 @@ def subtractBackground(img, bg):
     """
     Subtracts image background from current frame to obtain foreground.
     
-    Parameters:
+    Args:
         img (np.array): Current frame.
         bg (np.array): Computed background image.
     
     Returns:
-        diff (np.array): A foreground of the image.
+        np.array: A foreground of the image.
     """
     # Subtracting current frame from background
     diff = (np.abs(bg[:, :, 0].astype(np.float64) - img[:, :, 0].astype(np.float64)) > thr) | \
@@ -80,17 +86,138 @@ def find_matching_row(data, obj):
             return i
     return -1  # return -1 if no matching row is found
 
+def predictPosition(prev, curr, roi):
+    """
+    Uses OpticalFlow to predict position of each pixel of ROI in next frame.
+
+    Args:
+        prev (np.array): First 8-bit single-channel input image.
+        img (np.array): Next second input image of the same size and the same type as prev.
+        roi (tuple): Bounding box coordinates (x,y,w,h).
+
+    Returns:
+        tuple: Updated bounding box coordinates (x,y,w,h).
+    """
+    x,y,w,h = roi
+    prev = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    curr = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                
+    # Apply an optical flow algorithm to calculate the motion vectors
+    flow = cv2.calcOpticalFlowFarneback(prev, curr, None, 0.5, 2, 7, 2, 5, 1.1, 0)
+
+    # Track the ROI using optical flow
+    new_x = x + int(round(flow[y:y+h, x:x+w, 0].mean()))
+    new_y = y + int(round(flow[y:y+h, x:x+w, 1].mean()))
+
+    return new_x, new_y, w, h
+
+def compute_iou(bbox1, bbox2):
+    """
+    Compute the Intersection over Union (IoU) of two bounding boxes.
+
+    Args:
+        bbox1 (tuple): A tuple (x1, y1, x2, y2) representing the coordinates of the first bounding box.
+        bbox2 (tuple): A tuple (x1, y1, x2, y2) representing the coordinates of the second bounding box.
+
+    Returns:
+        float: The IoU value, ranging from 0 (no overlap) to 1 (complete overlap).
+    """
+    x1_bbox1, y1_bbox1, w_bbox1, h_bbox1 = bbox1
+    x1_bbox2, y1_bbox2, w_bbox2, h_bbox2 = bbox2
+
+    x2_bbox1 = x1_bbox1 + w_bbox1
+    x2_bbox2 = x1_bbox2 + w_bbox2
+    y2_bbox1 = y1_bbox1 + h_bbox1
+    y2_bbox2 = y1_bbox2 + h_bbox2
+
+    # Calculate the intersection coordinates
+    x1_intersection = max(x1_bbox1, x1_bbox2)
+    y1_intersection = max(y1_bbox1, y1_bbox2)
+    x2_intersection = min(x2_bbox1, x2_bbox2)
+    y2_intersection = min(y2_bbox1, y2_bbox2)
+
+    # Calculate the intersection area
+    intersection_width = max(0, x2_intersection - x1_intersection)
+    intersection_height = max(0, y2_intersection - y1_intersection)
+    intersection_area = intersection_width * intersection_height
+
+    # Calculate the area of each bounding box
+    bbox1_area = (x2_bbox1 - x1_bbox1) * (y2_bbox1 - y1_bbox1)
+    bbox2_area = (x2_bbox2 - x1_bbox2) * (y2_bbox2 - y1_bbox2)
+
+    # Calculate the union area
+    union_area = bbox1_area + bbox2_area - intersection_area
+
+    # Compute the IoU
+    iou = intersection_area / union_area if union_area > 0 else 0
+
+    return iou
+
+def update_track(track, x, y, w, h, descriptor, centroid):
+    """
+    Update the state of a track based on a matched pedestrian in the current frame.
+
+    Args:
+        track (dict): A dictionary representing the track to be updated.
+        x (int): The x-coordinate of the top-left corner of the bounding box of the matched pedestrian.
+        y (int): The y-coordinate of the top-left corner of the bounding box of the matched pedestrian.
+        w (int): The width of the bounding box of the matched pedestrian.
+        h (int): The height of the bounding box of the matched pedestrian.
+        descriptor (ndarray): An array representing the descriptor of the matched pedestrian.
+        centroid (tuple): A tuple representing the centroid of the matched pedestrian in the format (x, y).
+
+    Returns:
+        None
+    """
+    # Update the bounding box, descriptor, and centroid of the track
+    track['bbox'] = (x, y, w, h)
+    track['descriptor'] = descriptor
+    track['centroid'] = centroid
+    
+    # Compute the velocity of the track
+    prev_cx, prev_cy = track['centroid']
+    vx = centroid[0] - prev_cx
+    vy = centroid[1] - prev_cy
+    track['velocity'] = (vx, vy)
+    
+    # Reset the lost frames counter
+    track['lost_frames'] = 0
+
+def compute_distance(descriptor, track_desc, pos, track_bbox):
+    """
+    Compute the distance between a pedestrian in the current frame and a track.
+
+    Parameters:
+        descriptor (ndarray): An array representing the descriptor of the pedestrian in the current frame.
+        track_desc (ndarray): An array representing the descriptor of the track.
+        pos (tuple): A tuple representing the position of the pedestrian in the current frame in the format (x, y, w, h).
+        track_bbox (tuple): A tuple representing the bounding box of the track in the format (x, y, w, h).
+
+    Returns:
+        float: The distance between the pedestrian and the track.
+    """
+    # Euclidean distance between the descriptor of the pedestrian and the descriptor of the track
+    desc_dist = np.linalg.norm(descriptor - track_desc)
+    # Euclidean distance between the position of the pedestrian and the position of the track
+    c1 = getCentroid(pos)
+    c2 = getCentroid(track_bbox)
+    pos_dist = np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
+    
+    # Total distance with added weights
+    dist = desc_dist + pos_dist
+
+    return dist
+
+
 ############################################################################################
 bg = getBackground(cap)
-
-while cap.isOpened():    
+prev_frame = None
+while cap.isOpened():  
     ret, img = cap.read()
+    img_track = img.copy()
     if not ret:
         break
     
-    # For saving data from current frame
-    current_frame = []
-
     # 2) OBJECT DETECTION
     
     # Getting foreground objects -> pedestrians
@@ -117,13 +244,10 @@ while cap.isOpened():
     filtered_labels = np.where(np.isin(labels, np.where(stats[:, cv2.CC_STAT_AREA] >= minArea)[0]), labels, 0)
     filtered_label_stats = np.where(stats[:, cv2.CC_STAT_AREA] >= minArea)[0]
     
-    #label_image = (filtered_labels * (255 / num_labels)).astype(np.uint8)
-    #colored_label_image = cv2.applyColorMap(label_image, cv2.COLORMAP_HOT)
-    #if allViews:
-        #cv2.imshow('Filtered labels', colored_label_image)
-
     img_detect = img.copy()
-    
+    # Initialize a list to store the pedestrian information in the current frame
+    current_frame = []
+
     for i, lab in enumerate(filtered_label_stats):
         if lab == 0:  # Skip the background
             continue
@@ -133,79 +257,83 @@ while cap.isOpened():
         h = stats[lab, cv2.CC_STAT_HEIGHT]
 
         centroid = (int(x+(w/2)), int(y+(h/2)))       
-
-        # Saving centroids of each label 
+ 
         # Frame, ID, bbLeft, bbTop, Width, Height, Confidence,x,y,z
-        data.append([frame, id, x, y, w, h, 0, 0, 0, 0])                 
-                
-        cv2.rectangle(img_detect, (x,y), (x+w, y+h), (0, 255, 0), 1)
-        cv2.putText(img_detect, str(i+1), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
-        cv2.circle(img_detect, centroid, 3, (0,255,0), -1)            
-    
+        #data.append([frame, id, x, y, w, h, 0, 0, 0, 0])                 
+        ##############################
+        # TRACKING
 
-    # 3) OBJECT TRACKING - Gaussian distance
-    # Comparing with data from previous frame   
-    if frame > 1 & tracking:
-        img_track = img.copy()
-        
-        prev_frame = [sublist for sublist in data if sublist[0] == frame-1] 
-        current_frame = [sublist for sublist in data if sublist[0] == frame] 
-        
-        # Extract the centroids from previous frame
-        obj_prev = [row[2:6] for row in prev_frame]
-        
-        # Calculate the Euclidean distance
-        for obj_curr in current_frame: 
-            x = obj_curr[2]
-            y = obj_curr[3]
-            w = obj_curr[4]
-            h = obj_curr[5]  
-            print(f"Width: {w} Height: {h}")
-
-            c_curr = getCentroid([x,y,w,h])
-            distances = []
-            for obj_prev in prev_frame:  
-                c_prev = getCentroid(obj_prev[2:6]) 
-                distance = math.sqrt((c_prev[0]-c_curr[0])**2 + (c_prev[1]-c_curr[1])**2)
-                distances.append(distance)
-
-            # Find the index of the centroids that have the smallest distance
-            closest_centroid_index = np.argmin(distances)
+        # Predicting position using optical flow
+        if(frame > 1):
+            roi = x,y,w,h
             
-            print(distances[closest_centroid_index])
-
-            # Large distance -> new object
-            if distances[closest_centroid_index] < maxDistance:
-                # Retrieve the closest centroid from the array
-                closest = prev_frame[closest_centroid_index]
-                # Get row index from dataset by bbox
-                index = find_matching_row(data, closest)
+            # Compute the descriptor of the pedestrian
+            descriptor = cv2.calcHist([img[x:x+w, y:y+h]], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
+            #descriptor = None
+            # Initialize variables for tracking
+            matched_track = None  # The track that matches the current pedestrian
+            min_distance = float('inf')  # The minimum distance between the current pedestrian and any track
+            predicted_pos = None  # The predicted position of the current pedestrian based on the motion model of the track
+            maxIOU = 0.0
+            # Try to match the current pedestrian with a track
+            for track in tracks:
+                # Predict the position of the track in the current frame
+                #predicted_pos = predictPosition(prev_frame, img, track['bbox'])                
                 
+                # Compute the distance between the current pedestrian and the track
+                distance = compute_distance(descriptor, track['descriptor'], roi, track['bbox'])
+                #iou = compute_iou(track['bbox'], roi)
                 
-                # Update the id in the dataset
-                data[index][1] = obj_curr[1]
+                # Update the closest track                
+                if distance < min_distance:
+                    matched_track = track
+                    min_distance = distance                  
+                    #maxIOU = iou
+            
+            if matched_track is not None and min_distance < maxDistance:                
+                # Update the matched track with the current pedestrian
+                update_track(matched_track, x, y, w, h, descriptor, centroid)                
             else:
-                # Assign a new ID
-                obj_curr[1] = id 
-                id+=1        
+                # Add a new track for the current pedestrian
+                track = {'id': next_id,
+                        'bbox': (x, y, w, h),
+                        'descriptor': descriptor,
+                        'centroid': centroid,
+                        'velocity': (0, 0),
+                        'lost_frames': 0}
+                tracks.append(track)
+                next_id += 1
             
-            cv2.rectangle(img_track, (x,y), (x+w, y+h), (0, 0, 255), 1)
-            cv2.putText(img_track, str(obj_curr[1]), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-        cv2.imshow('Tracked objects', img_track)
+            # Add the pedestrian information to the current frame list
+            current_frame.append({'bbox': (x, y, w, h), 'descriptor': descriptor, 'centroid': centroid})
 
-        # Get all GTs for current frame
-        gt = ground_truth[ground_truth["Frame"] == frame]    
-
-        # 1) PLOTTING GROUND TRUTH
-        if show_gt:
-            for i, bbox in gt.iterrows():    
-                cv2.rectangle(img_detect, (int(bbox[2]), int(bbox[3])), (int(bbox[2]+bbox[4]), int(bbox[3]+bbox[5])), (255,0,0), 1)
-                cv2.putText(img_detect, str(int(bbox[1])), (int(bbox[2]+10), int(bbox[3]-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)  
-
+    # Update the lost tracks
+    # How many frames have elapsed since the last time a track was successfully matched with a pedestrian.
+    if(frame > 1):
+        for track in tracks:
+            if track['lost_frames'] > max_lost_frames:
+                tracks.remove(track)
+            else:
+                track['lost_frames'] += 1
+            
+        # Show the current frame with the tracks
         
-        cv2.imshow('Detected objects', img_detect)   
+        for track in tracks:
+            x, y, w, h = track['bbox']
+            cv2.rectangle(img_track, (x, y), (x+w, y+h), (0, 255, 0), 1)
+            cv2.putText(img_track, f"{track['id']}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.imshow('Tracked image', img_track)
+
+    #############################
+    #     cv2.rectangle(img_detect, (x,y), (x+w, y+h), (0, 255, 0), 1)
+    #     cv2.putText(img_detect, str(i+1), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+    #     cv2.circle(img_detect, centroid, 3, (0,255,0), -1)            
+    # cv2.imshow('Detected objects', img_detect)    
+        
+         
     #####################################
     frame += 1
+    prev_frame = img.copy()
     # Wait for a key press to exit
     if cv2.waitKey(25) & 0xFF == ord('q'):
         break
