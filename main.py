@@ -1,24 +1,32 @@
 import cv2
 import pandas as pd
 import numpy as np
-from scipy.optimize import linear_sum_assignment
+import matplotlib as plt
+from matplotlib.colors import Normalize
+from scipy.ndimage import gaussian_filter
 
 show_gt = False
 
-minIOU = 0.3
 thr = 50 # Used for background subtraction
 minArea = 175 # Minimal area to be considered a component
-maxDistance = 75 #Centroid:25  # Maximal distance between frames of each person
+maxDistance = 25 #Centroid:25  # Maximal distance between frames of each person
+max_lost_frames = 7  # Maximum number of frames a track can be lost before it is removed
+path_len = 15 # length of displayed trajectory
+
+next_id = 1  # ID to assign to the next detected pedestrian
+frame = 1 # Number of current frame
+
+# Define colormap and normalize colors based on number of pedestrians
+colormap = plt.cm.get_cmap('inferno')
+norm = Normalize(vmin=0, vmax=100)
 kernel = np.ones((5,5),np.uint8) # Used for orphological operations
 
-# Initialize variables for tracking
 tracks = []  # List of tracks, each track is a dict containing the ID, bounding box, and descriptor of a pedestrian
-next_id = 1  # ID to assign to the next detected pedestrian
-max_lost_frames = 5  # Maximum number of frames a track can be lost before it is removed
-
-frame = 1 # Number of current frame
 ground_truth = pd.read_csv('./gt.txt', sep=',', names=["Frame", "ID", "bbLeft", "bbTop", "Width", "Height", "Confidence", "x", "y", "z"])
 cap = cv2.VideoCapture("./dataset/frame_%04d.jpg")
+
+# Initialize an empty heatmap
+heatmap = np.zeros((int(cap.get(4)), int(cap.get(3)))) # 3 - Frame width, 4 - Frame height
 
 ############################################################################################
 def getBackground(cap, n=25):
@@ -120,50 +128,52 @@ def compute_iou(bbox1, bbox2):
     return iou
 
 
-def update_track(track, bbox, centroid):
+def update_track(track, bbox, path_point):
     """
     Update the state of a track based on a matched pedestrian in the current frame.
 
     Args:
         track (dict): A dictionary representing the track to be updated.
         bbox (tuple): Coordinates of the bounding box.
-        centroid (tuple): A tuple representing the centroid of the matched pedestrian in the format (x, y).
+        path_point (tuple): A tuple representing the path point of the matched pedestrian in the format (x, y).
 
     Returns:
         None
     """
     # Update the bounding box, descriptor, and centroid of the track
     track['bbox'] = bbox
-    #track['descriptor'] = descriptor
-    track['centroid'] = centroid
     
-    # Compute the velocity of the track
-    prev_cx, prev_cy = track['centroid']
-    vx = centroid[0] - prev_cx
-    vy = centroid[1] - prev_cy
-    track['velocity'] = (vx, vy)
-    
+    if(len(track['path']) > path_len):
+        track['path'].pop(0)
+
+    track['path'].append(path_point)
+        
     # Reset the lost frames counter
     track['lost_frames'] = 0
 
 
-def compute_distance(descriptor, track_desc):
+def compute_distance(descriptor, track_desc,c1, track_bbox):
     """
-    Computes euclidian distance between a pedestrian in the current frame and a track.
-
+    Compute the distance between a pedestrian in the current frame and a track.
     Parameters:
-        descriptor (ndarray): An array representing the histogram of the pedestrian in the current frame.
-        track_desc (ndarray): An array representing the histogram of the track.
-
+        descriptor (ndarray): An array representing the descriptor of the pedestrian in the current frame.
+        track_desc (ndarray): An array representing the descriptor of the track.
+        c1 (tuple): A tuple representing the position of the pedestrians centroid in the current frame in the format (x, y).
+        track_bbox (tuple): A tuple representing the bounding box of the track in the format (x, y, w, h).
     Returns:
         float: The distance between the pedestrian and the track.
     """
-    dist = np.linalg.norm(track_desc-descriptor)
-    return dist     
+    
+    c2 = getCentroid(track_bbox)
+    pos_dist = np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
+
+    hist_dist = np.linalg.norm(track_desc-descriptor)
+    return pos_dist * hist_dist    
 
 
 ############################################################################################
 bg = getBackground(cap)
+
 while cap.isOpened():  
     ret, img = cap.read()    
     if not ret:
@@ -200,7 +210,11 @@ while cap.isOpened():
         w = stats[lab, cv2.CC_STAT_WIDTH]
         h = stats[lab, cv2.CC_STAT_HEIGHT]
 
-        centroid = (int(x+(w/2)), int(y+(h/2)))       
+        centroid = (int(x+(w/2)), int(y+(h/2)))   
+        path_point = (int(x+(w/2)), int(y+h))  
+
+        # Updating heatmap
+        heatmap[path_point[1],path_point[0]] += 5  
 
         # Remove bg from pedestrian bbox with mask from CCA
         ped = cv2.bitwise_and(img[y:y+h, x:x+w], img[y:y+h, x:x+w], mask=img_opn[y:y+h, x:x+w])
@@ -210,47 +224,46 @@ while cap.isOpened():
         descriptor = cv2.calcHist(ped, [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
 
         # Normalize the histogram
-        #descriptor = cv2.normalize(descriptor, descriptor).flatten()
+        descriptor = cv2.normalize(descriptor, descriptor).flatten()
 
-        # Add the pedestrian information to the detections list
-        detections.append({'bbox': (x, y, w, h), 'descriptor': descriptor, 'centroid': centroid})
-        
-        # If it's not the first frame, associate tracks and detections using the Hungarian algorithm
-        if frame > 1:
-            cost_matrix = np.zeros((len(tracks), len(detections)))
-
-            for t, track in enumerate(tracks):
-                for d, det in enumerate(detections):
-                    distance = compute_distance(det['descriptor'], track['descriptor'])
-                    cost_matrix[t, d] = distance
-
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
-
-            for r, c in zip(row_ind, col_ind):
-                if cost_matrix[r, c] < maxDistance:
-                    update_track(tracks[r], detections[c]['bbox'], detections[c]['centroid'])
-                else:
-                    # Add a new track for the current pedestrian
-                    track = {'id': next_id,
-                            'bbox': (detections[c]['bbox'][0], detections[c]['bbox'][1], detections[c]['bbox'][2], detections[c]['bbox'][3]),
-                            'descriptor': detections[c]['descriptor'],
-                            'centroid': detections[c]['centroid'],
-                            'velocity': (0, 0),
-                            'lost_frames': 0}
-                    tracks.append(track)
-                    next_id += 1
-        else:
-            # Initialize tracks with the detected pedestrians in the first frame
-            for det in detections:
+        if(frame > 1):
+            roi = x,y,w,h
+            
+            # Initialize variables for tracking
+            matched_track = None  # The track that matches the current pedestrian
+            min_distance = float('inf')  # The minimum distance between the current pedestrian and any track
+            # Try to match the current pedestrian with a track
+            for track in tracks:                      
+                # Compute the distance between the current pedestrian and the track
+                distance = compute_distance(descriptor, track['descriptor'],centroid, track['bbox'])
+                                
+                # Update the closest track                
+                if distance < min_distance:
+                    matched_track = track
+                    min_distance = distance                  
+                    
+            if matched_track is not None and min_distance < maxDistance:                
+                # Update the matched track with the current pedestrian
+                update_track(matched_track, roi, path_point)                
+            else:
+                # Add a new track for the current pedestrian
                 track = {'id': next_id,
-                        'bbox': det['bbox'],
-                        'descriptor': det['descriptor'],
-                        'centroid': det['centroid'],
-                        'velocity': (0, 0),
+                        'bbox': (x, y, w, h),
+                        'descriptor': descriptor,
+                        'path': [path_point],
                         'lost_frames': 0}
                 tracks.append(track)
                 next_id += 1
-
+        else:
+            # Initialize tracks with the detected pedestrians in the first frame
+            track = {'id': next_id,
+                    'bbox': (x,y,w,h),
+                    'descriptor': descriptor,
+                    'path': [path_point],
+                    'lost_frames': 0}
+            tracks.append(track)
+            next_id += 1              
+                
     # Update the lost tracks
     if(frame > 1):
         for track in tracks:
@@ -259,14 +272,27 @@ while cap.isOpened():
             else:
                 track['lost_frames'] += 1
 
-        # Show the current frame with the tracks
-        for track in tracks:
+        # Show the current frame with the tracks, update heatmap
+        for track in tracks:            
+            id = track['id']
             x, y, w, h = track['bbox']
+            #color = np.array(colormap(norm(id))[:3]) * 255  # Get the color based on ID
             cv2.rectangle(img_track, (x, y), (x+w, y+h), (0, 255, 0), 1)
-            cv2.putText(img_track, f"{track['id']}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        
+            cv2.putText(img_track, f"{id}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+            cv2.polylines(img_track, [np.array(track['path'], dtype=np.int32).reshape((-1, 1, 2))], False, (0,0,255), 1)
+            #for c in track['path']:
+            #    cv2.circle(img_track, (c[0], c[1]), 2, (0,0,255), -1)              
+                
         cv2.putText(img_track, f"Frame: {frame}", (5,15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
         cv2.imshow('Tracked image', img_track)
+
+    # Display heatmap
+    smoothed_heatmap = gaussian_filter(heatmap, sigma=6)
+    showHeatmap = (colormap(smoothed_heatmap) * 2**16).astype(np.uint16)[:,:,:3]
+    showHeatmap = cv2.cvtColor(showHeatmap, cv2.COLOR_RGB2BGR)
+    
+    cv2.imshow('Heatmap', showHeatmap)
          
     #####################################
     frame += 1
@@ -274,5 +300,6 @@ while cap.isOpened():
     if cv2.waitKey(25) & 0xFF == ord('q'):
         break
 
+cv2.waitKey()
 cap.release()
 cv2.destroyAllWindows()
