@@ -1,11 +1,11 @@
 import cv2
 import pandas as pd
 import numpy as np
-import matplotlib as plt
+import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from scipy.ndimage import gaussian_filter
 
-show_gt = False
+show_gt = True
 
 thr = 50 # Used for background subtraction
 minArea = 175 # Minimal area to be considered a component
@@ -18,15 +18,51 @@ frame = 1 # Number of current frame
 
 # Define colormap and normalize colors based on number of pedestrians
 colormap = plt.cm.get_cmap('inferno')
-norm = Normalize(vmin=0, vmax=100)
 kernel = np.ones((5,5),np.uint8) # Used for orphological operations
 
+iou_values = [] # List of IOU values for the plot
 tracks = []  # List of tracks, each track is a dict containing the ID, bounding box, and descriptor of a pedestrian
 ground_truth = pd.read_csv('./gt.txt', sep=',', names=["Frame", "ID", "bbLeft", "bbTop", "Width", "Height", "Confidence", "x", "y", "z"])
 cap = cv2.VideoCapture("./dataset/frame_%04d.jpg")
 
+width = int(cap.get(3))
+height = int(cap.get(4))
+
 # Initialize an empty heatmap
-heatmap = np.zeros((int(cap.get(4)), int(cap.get(3)))) # 3 - Frame width, 4 - Frame height
+heatmap = np.zeros((height, width)) # 3 - Frame width, 4 - Frame height
+
+# Initialize the plot for IoU
+plt.ion()
+#fig, ax = plt.subplots()
+# Create figure and subplots
+fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(12, 6))
+fig.canvas.manager.set_window_title('Pedestrian tracking project | Group 11') 
+
+
+# Tracked image
+axes[0, 0].set_title('Pedestrian tracking')
+axes[0, 0].imshow(heatmap)
+axes[0, 0].set_axis_off()
+
+# Heatmap
+axes[0, 1].imshow(heatmap)
+axes[0, 1].set_title('Occupancy map')
+
+# IoU plot
+axes[1, 0].plot(heatmap)
+axes[1, 0].set_title('Success plot')
+
+axes[1, 1].imshow(heatmap)
+axes[1, 1].set_title('Image 4')
+
+
+# Evaluation
+iou_thr = 0.4
+total_detections = 0
+false_negatives = 0
+false_positives = 0
+true_positives = 0
+ground_truth_count = 0 # len(ground_truth) - instead    , increasing dynamically
 
 ############################################################################################
 def getBackground(cap, n=25):
@@ -90,12 +126,17 @@ def compute_iou(bbox1, bbox2):
     Compute the Intersection over Union (IoU) of two bounding boxes.
 
     Args:
-        bbox1 (tuple): A tuple (x1, y1, x2, y2) representing the coordinates of the first bounding box.
-        bbox2 (tuple): A tuple (x1, y1, x2, y2) representing the coordinates of the second bounding box.
+        bbox1 (tuple): A tuple (x1, y1, w, h) representing the coordinates of the first bounding box.
+        bbox2 (tuple): A tuple (x1, y1, w, h) representing the coordinates of the second bounding box.
 
     Returns:
         float: The IoU value, ranging from 0 (no overlap) to 1 (complete overlap).
     """
+
+    # Check for perfect match
+    if bbox1 == bbox2:
+        return 1.0
+
     x1_bbox1, y1_bbox1, w_bbox1, h_bbox1 = bbox1
     x1_bbox2, y1_bbox2, w_bbox2, h_bbox2 = bbox2
 
@@ -103,6 +144,7 @@ def compute_iou(bbox1, bbox2):
     x2_bbox2 = x1_bbox2 + w_bbox2
     y2_bbox1 = y1_bbox1 + h_bbox1
     y2_bbox2 = y1_bbox2 + h_bbox2
+
 
     # Calculate the intersection coordinates
     x1_intersection = max(x1_bbox1, x1_bbox2)
@@ -120,7 +162,7 @@ def compute_iou(bbox1, bbox2):
     bbox2_area = (x2_bbox2 - x1_bbox2) * (y2_bbox2 - y1_bbox2)
 
     # Calculate the union area
-    union_area = bbox1_area + bbox2_area - intersection_area
+    union_area = bbox1_area + bbox2_area - intersection_area   
 
     # Compute the IoU
     iou = intersection_area / union_area if union_area > 0 else 0
@@ -168,7 +210,22 @@ def compute_distance(descriptor, track_desc,c1, track_bbox):
     pos_dist = np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
 
     hist_dist = np.linalg.norm(track_desc-descriptor)
-    return pos_dist * hist_dist    
+    return pos_dist * hist_dist  
+
+
+def get_ground_truth_bboxes(frame, ground_truth):
+    """
+    Get the ground truth bounding boxes for the given frame number.
+
+    Args:
+        frame (int): The frame number.
+        ground_truth (pd.DataFrame): Ground truth data.
+
+    Returns:
+        List[tuple]: A list of tuples containing ground truth bounding boxes in the format (x, y, w, h).
+    """
+    gt_bboxes = ground_truth[ground_truth['Frame'] == frame][['bbLeft', 'bbTop', 'Width', 'Height']].values
+    return [tuple(x) for x in gt_bboxes]
 
 
 ############################################################################################
@@ -179,6 +236,14 @@ while cap.isOpened():
     if not ret:
         break
     img_track = img.copy()
+    
+    # Check if user closed the window
+    if not plt.fignum_exists(fig.number):
+        # User closed the window, break the loop
+        break
+
+    # Initialize an empty list to store IoUs
+    iou_frame = []
     
     # 2) OBJECT DETECTION
     # Getting foreground objects -> pedestrians
@@ -228,6 +293,18 @@ while cap.isOpened():
 
         if(frame > 1):
             roi = x,y,w,h
+
+            # Get ground truth bounding boxes for the current frame
+            gt_bboxes = get_ground_truth_bboxes(frame, ground_truth)                    
+
+            # Computing IOU
+            # Calculate IoU between the detected bounding box and all ground truth bounding boxes
+            iou = [compute_iou(roi, gt_bbox) for gt_bbox in gt_bboxes]            
+
+            # Find the maximum IoU value - Closest bbox
+            max_iou = max(iou)
+            # Append the maximum IoU value to the list of IoUs
+            iou_frame.append(max_iou)
             
             # Initialize variables for tracking
             matched_track = None  # The track that matches the current pedestrian
@@ -270,29 +347,86 @@ while cap.isOpened():
             if track['lost_frames'] > max_lost_frames:
                 tracks.remove(track)
             else:
-                track['lost_frames'] += 1
-
+                track['lost_frames'] += 1       
+        
         # Show the current frame with the tracks, update heatmap
         for track in tracks:            
             id = track['id']
-            x, y, w, h = track['bbox']
-            #color = np.array(colormap(norm(id))[:3]) * 255  # Get the color based on ID
+            x, y, w, h = track['bbox']            
+
             cv2.rectangle(img_track, (x, y), (x+w, y+h), (0, 255, 0), 1)
             cv2.putText(img_track, f"{id}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-            cv2.polylines(img_track, [np.array(track['path'], dtype=np.int32).reshape((-1, 1, 2))], False, (0,0,255), 1)
-            #for c in track['path']:
-            #    cv2.circle(img_track, (c[0], c[1]), 2, (0,0,255), -1)              
-                
+            #cv2.polylines(img_track, [np.array(track['path'], dtype=np.int32).reshape((-1, 1, 2))], False, (0,0,255), 1)
+            for c in track['path']:
+                cv2.circle(img_track, (c[0], c[1]), 2, (0,0,255), -1)              
+
+
+        # Increase number of gt detections
+        ground_truth_count += len(gt_bboxes)
+
+        # Check for false positives or false negatives
+        for iou in iou_frame:
+            # Correct detection - True positive
+            if iou >= iou_thr:
+                true_positives += 1
+
+            # Wrong detection - False positive
+            else:
+                false_positives += 1
+
+            # Increase number of detections
+            total_detections += 1
+
+        # Calculate the average IoU for the current frame
+        avg_iou = round(np.mean(iou_frame),2) 
+
+        # Append mean value for the plot
+        iou_values.append(avg_iou)            
+        
         cv2.putText(img_track, f"Frame: {frame}", (5,15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-        cv2.imshow('Tracked image', img_track)
+        cv2.putText(img_track, f"IoU: {avg_iou}", (5,40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        cv2.putText(img_track, f"FP: {false_positives} | {round(false_positives / total_detections * 100, 2)} %", (5,60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(img_track, f"FN: {ground_truth_count - true_positives} | {round((ground_truth_count - true_positives) / total_detections * 100, 2)} %", (5,80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # Displaying ground truth
+        if show_gt:
+            for i, bbox in ground_truth[ground_truth['Frame'] == frame].iterrows():    
+                cv2.rectangle(img_track, (int(bbox[2]), int(bbox[3])), (int(bbox[2]+bbox[4]), int(bbox[3]+bbox[5])), (255,0,0), 1)
+                cv2.putText(img_track, str(int(bbox[1])), (int(bbox[2]+10), int(bbox[3]-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
+        
+        axes[0,0].images[0].set_data(cv2.cvtColor(img_track, cv2.COLOR_BGR2RGB))
+        #axes[0, 0].imshow(cv2.cvtColor(img_track, cv2.COLOR_BGR2RGB))
+        #axes[0, 0].set_title('Pedestrian tracking')
+        #cv2.imshow('Tracked image', img_track)
 
     # Display heatmap
     smoothed_heatmap = gaussian_filter(heatmap, sigma=6)
     showHeatmap = (colormap(smoothed_heatmap) * 2**16).astype(np.uint16)[:,:,:3]
-    showHeatmap = cv2.cvtColor(showHeatmap, cv2.COLOR_RGB2BGR)
+    #showHeatmap = cv2.cvtColor(showHeatmap, cv2.COLOR_RGB2BGR)
     
-    cv2.imshow('Heatmap', showHeatmap)
+    axes[0,1].images[0].set_data(colormap(smoothed_heatmap))
+    #axes[0, 1].imshow(colormap(smoothed_heatmap))
+    #axes[0, 1].set_title('Pedestrian occupancy map')
+    # cv2.imshow('Heatmap', showHeatmap)
+
+    # Update the IoU plot
+    axes[1,0].clear()
+    axes[1,0].set_ylim(0,1)
+    axes[1,0].plot(iou_values, label='IoU')
+    axes[1,0].legend()
+    axes[1,0].set_xlabel('Frame')
+    axes[1,0].set_ylabel('IoU')
+
+    # ax.clear()
+    # ax.set_ylim(0,1)
+    # ax.plot(iou_values, label='IoU')
+    # ax.legend()
+    # ax.set_xlabel('Frame')
+    # ax.set_ylabel('IoU')
+    # ax.set_title('Intersection over Union (IoU) per Frame')
+    plt.tight_layout()
+    plt.draw()
+    plt.pause(0.001)
          
     #####################################
     frame += 1
@@ -302,4 +436,7 @@ while cap.isOpened():
 
 cv2.waitKey()
 cap.release()
-cv2.destroyAllWindows()
+
+# Close the figure window
+plt.close(fig)
+#cv2.destroyAllWindows()
