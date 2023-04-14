@@ -10,13 +10,13 @@ from sklearn.mixture import GaussianMixture
 show_gt = True
 thr = 50 # Used for background subtraction
 minArea = 175 # Minimal area to be considered a component
-maxDistance = 25 #Centroid:25  # Maximal distance between frames of each person
+maxDistance = 25  # Maximal distance between frames of each person
 max_lost_frames = 7  # Maximum number of frames a track can be lost before it is removed
-path_len = 15 # length of displayed trajectory
+path_len = 15 # Length of displayed trajectory
 update_interval = 3 # How often is the figure redrawn
 next_id = 1  # ID to assign to the next detected pedestrian
 frame = 1 # Number of current frame
-iou_thr = 0.4
+iou_thr = 0.4 # Threshold for success rate - True positives
 
 # Define colormap and normalize colors based on number of pedestrians
 colormap = plt.cm.get_cmap('inferno')
@@ -42,34 +42,41 @@ trajectories = []
 em_update_interval = 10  # Update the EM algorithm every 10 frames
 
 # Initialize an empty heatmap
-heatmap = np.zeros((height, width)) # 3 - Frame width, 4 - Frame height
+heatmap = np.zeros((height, width))
 
 # Initialize the plot for IoU
 plt.ion()
-fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(14, 8))
+fig = plt.figure(figsize=(14, 8))
+gs = fig.add_gridspec(2,3)
 fig.canvas.manager.set_window_title('Pedestrian tracking and analysis') 
 
 # Get the current figure manager and set the window to fullscreen
 manager = plt.get_current_fig_manager()
 manager.window.showMaximized()
 
+# Subplots
+ax1 = fig.add_subplot(gs[0, 0])
+ax2 = fig.add_subplot(gs[0, 1])
+ax3 = fig.add_subplot(gs[0, 2])
+ax4 = fig.add_subplot(gs[1, :])
+
 # Tracked image
-axes[0, 0].set_title('Pedestrian tracking')
-axes[0, 0].imshow(np.zeros((height, width)))
-axes[0, 0].set_axis_off()
-
-# Heatmap
-axes[1, 0].imshow(heatmap)
-axes[1, 0].set_title('Occupancy map')
-
-# IoU plot
-axes[1, 1].plot(heatmap)
-axes[1, 1].set_title(f'Success plot - IOU > {iou_thr}')
+ax1.set_title('Pedestrian tracking')
+ax1.imshow(np.zeros((height, width)))
+ax1.set_axis_off()
 
 # EA analysis
-axes[0, 1].imshow(np.zeros((height, width)))
-axes[0, 1].set_title('Analysis of pedestrian trajectories')
-axes[0, 1].set_axis_off()
+ax2.imshow(np.zeros((height, width)))
+ax2.set_title('Analysis of pedestrian trajectories')
+ax2.set_axis_off()
+
+# Heatmap
+ax3.imshow(heatmap)
+ax3.set_title('Occupancy map')
+
+# IoU plot
+ax4.plot(heatmap)
+ax4.set_title(f'Success plot - IOU > {iou_thr}')
 
 ############################################################################################
 def getBackground(cap, n=25):
@@ -179,7 +186,6 @@ def compute_iou(bbox1, bbox2):
     x2_bbox2 = x1_bbox2 + w_bbox2
     y2_bbox1 = y1_bbox1 + h_bbox1
     y2_bbox2 = y1_bbox2 + h_bbox2
-
 
     # Calculate the intersection coordinates
     x1_intersection = max(x1_bbox1, x1_bbox2)
@@ -444,43 +450,43 @@ while cap.isOpened():
         cv2.putText(img_track, f"IoU: {avg_iou}", (5,40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         cv2.putText(img_track, f"FP: {false_positives} | {round(false_positives / total_detections * 100, 2)} %", (5,60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         cv2.putText(img_track, f"FN: {ground_truth_count - true_positives} | {round((ground_truth_count - true_positives) / total_detections * 100, 2)} %", (5,80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        axes[0,0].images[0].set_data(cv2.cvtColor(img_track, cv2.COLOR_BGR2RGB))
+        ax1.images[0].set_data(cv2.cvtColor(img_track, cv2.COLOR_BGR2RGB))
 
     # Display heatmap
     smoothed_heatmap = gaussian_filter(heatmap, sigma=6)
     showHeatmap = (colormap(smoothed_heatmap) * 2**32).astype(np.uint32)[:,:,:3]
-    axes[1, 0].images[0].set_data(colormap(smoothed_heatmap))
+    ax3.images[0].set_data(colormap(smoothed_heatmap))
 
     # Update the IoU plot -> every 5 values
-    axes[1,1].clear()
-    axes[1,1].set_ylim(0,1)
+    ax4.clear()
+    ax4.set_ylim(0,1)
     subset_iou_values = iou_values[::5]
     x_values = list(range(0, len(iou_values), 5))
 
     # Plot the subset values with the corresponding x-axis values
-    axes[1,1].plot(x_values, subset_iou_values, label='IoU')
-    axes[1,1].legend()
-    axes[1,1].set_xlabel('Frame')
-    axes[1,1].set_ylabel('IoU')
-    axes[1,1].set_title(f'Success plot - IOU > {iou_thr}')
+    ax4.plot(x_values, subset_iou_values, label='IoU')
+    ax4.legend()
+    ax4.set_xlabel('Frame')
+    ax4.set_ylabel('IoU')
+    ax4.set_title(f'Success plot - IOU > {iou_thr}')
 
     # EM
     if frame % em_update_interval == 0 and len(trajectories) > 0:
         trajectories_data = np.vstack(trajectories)
         labels = apply_em(trajectories_data, n_components)
 
-        axes[0, 1].clear()
-        axes[0, 1].imshow(cv2.cvtColor(bg, cv2.COLOR_BGR2RGB))
-        axes[0, 1].set_title('Analysis of pedestrian trajectories')
+        ax2.clear()
+        ax2.imshow(cv2.cvtColor(bg, cv2.COLOR_BGR2RGB))
+        ax2.set_title('Analysis of pedestrian trajectories')
         
         for i, label in enumerate(np.unique(labels)):
             traj_data = trajectories_data[labels == label]
-            axes[0, 1].scatter(traj_data[:, 0], traj_data[:, 1], s=5, color=colormap(i / len(np.unique(labels))), label=f"Group {i + 1}")
+            ax2.scatter(traj_data[:, 0], traj_data[:, 1], s=5, color=colormap(i / len(np.unique(labels))), label=f"Group {i + 1}")
 
-        axes[0, 1].set_xlim(0, width)
-        axes[0, 1].set_ylim(height, 0)
-        axes[0, 1].legend()
-        axes[0, 1].set_axis_off()
+        ax2.set_xlim(0, width)
+        ax2.set_ylim(height, 0)
+        ax2.legend()
+        ax2.set_axis_off()
     
     # Update the IoU plot only if the current frame is a multiple of update_interval
     if frame % update_interval == 0:        
