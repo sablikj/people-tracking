@@ -1,4 +1,4 @@
-# People tracking | Final project for CVI
+# People tracking
 
 Human activity analysis using pedestrian’s trajectories performed in open spaces. Using dataset [PETS 2009 Benchmark Data S2L1](https://cs.binghamton.edu/~mrldata/pets2009).
 
