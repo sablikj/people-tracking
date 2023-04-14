@@ -16,7 +16,7 @@ path_len = 15 # Length of displayed trajectory
 update_interval = 3 # How often is the figure redrawn
 next_id = 1  # ID to assign to the next detected pedestrian
 frame = 1 # Number of current frame
-iou_thr = 0.4 # Threshold for success rate - True positives
+iou_thr = 0.5 # Threshold for success rate - True positives
 
 # Define colormap and normalize colors based on number of pedestrians
 colormap = plt.cm.get_cmap('inferno')
@@ -442,9 +442,9 @@ while cap.isOpened():
             # Increase number of detections
             total_detections += 1
 
+        iou_values.append(iou_frame)  
         # Calculate the average IoU for the current frame
-        avg_iou = round(np.mean(iou_frame),2) 
-        iou_values.append(avg_iou)            
+        avg_iou = round(np.mean(iou_frame),2)                   
         
         cv2.putText(img_track, f"Frame: {frame}", (5,15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         cv2.putText(img_track, f"IoU: {avg_iou}", (5,40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -459,12 +459,21 @@ while cap.isOpened():
 
     # Update the IoU plot -> every 5 values
     ax4.clear()
-    ax4.set_ylim(0,1)
+    #ax4.set_ylim(0,1)
+    #ax4.set_xlim(0,800)
     subset_iou_values = iou_values[::5]
     x_values = list(range(0, len(iou_values), 5))
 
+    # calculate success rates for each frame
+    success_rates = []
+    for sublist in subset_iou_values:
+        num_successes = sum([score > iou_thr for score in sublist])
+        success_rate = num_successes / len(sublist)
+        success_rates.append(success_rate)
+
     # Plot the subset values with the corresponding x-axis values
-    ax4.plot(x_values, subset_iou_values, label='IoU')
+    #ax4.plot(x_values, subset_iou_values, label='IoU')
+    ax4.plot(x_values, success_rates, label='IoU')
     ax4.legend()
     ax4.set_xlabel('Frame')
     ax4.set_ylabel('IoU')
