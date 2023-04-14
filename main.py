@@ -1,9 +1,12 @@
 import cv2
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Qt5Agg')  # Set the backend to Qt5Agg
 import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.patches import Ellipse
 from scipy.ndimage import gaussian_filter
+from sklearn.mixture import GaussianMixture
 
 show_gt = True
 
@@ -33,27 +36,33 @@ heatmap = np.zeros((height, width)) # 3 - Frame width, 4 - Frame height
 
 # Initialize the plot for IoU
 plt.ion()
-#fig, ax = plt.subplots()
-# Create figure and subplots
-fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(12, 6))
-fig.canvas.manager.set_window_title('Pedestrian tracking project | Group 11') 
 
+
+# Create figure and subplots
+fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(14, 8))
+fig.canvas.manager.set_window_title('Pedestrian tracking project | Group 11') 
+# Get the current figure manager and set the window to fullscreen
+manager = plt.get_current_fig_manager()
+manager.window.showMaximized()
+plt.tight_layout()
 
 # Tracked image
 axes[0, 0].set_title('Pedestrian tracking')
-axes[0, 0].imshow(heatmap)
+axes[0, 0].imshow(np.zeros((height, width)))
 axes[0, 0].set_axis_off()
 
 # Heatmap
-axes[0, 1].imshow(heatmap)
-axes[0, 1].set_title('Occupancy map')
+axes[1, 0].imshow(heatmap)
+axes[1, 0].set_title('Occupancy map')
 
 # IoU plot
-axes[1, 0].plot(heatmap)
-axes[1, 0].set_title('Success plot')
+axes[1, 1].plot(heatmap)
+axes[1, 1].set_title('Success plot')
 
-axes[1, 1].imshow(heatmap)
-axes[1, 1].set_title('Image 4')
+# EA analysis
+axes[0, 1].imshow(np.zeros((height, width)))
+axes[0, 1].set_title('Analysis of pedestrian trajectories')
+axes[0, 1].set_axis_off()
 
 
 # Evaluation
@@ -63,6 +72,13 @@ false_negatives = 0
 false_positives = 0
 true_positives = 0
 ground_truth_count = 0 # len(ground_truth) - instead    , increasing dynamically
+
+# Gaussian mixture model for EM
+n_components = 5  # The number of Gaussian components to be used in the GMM
+gmm = GaussianMixture(n_components=n_components, covariance_type='full')
+trajectories = []
+em_update_interval = 10  # Update the EM algorithm every 10 frames
+colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow', 'black', 'gray']
 
 ############################################################################################
 def getBackground(cap, n=25):
@@ -227,6 +243,32 @@ def get_ground_truth_bboxes(frame, ground_truth):
     gt_bboxes = ground_truth[ground_truth['Frame'] == frame][['bbLeft', 'bbTop', 'Width', 'Height']].values
     return [tuple(x) for x in gt_bboxes]
 
+def extract_trajectories(tracks):
+    trajectories = []
+    for track in tracks:
+        trajectory = np.array(track['path'])
+        trajectories.append(trajectory)
+    return trajectories
+
+
+def draw_ellipse(position, covariance, ax, edge_color, face_color, lw=2, alpha=0.5):
+    """Draw an ellipse with a given position, covariance, and color."""
+    if covariance.shape == (2, 2):
+        U, s, Vt = np.linalg.svd(covariance)
+        angle = np.degrees(np.arctan2(U[1, 0], U[0, 0]))
+        width, height = 2 * np.sqrt(s)
+    else:
+        angle = 0
+        width, height = 2 * np.sqrt(covariance)
+    
+    ellipse = Ellipse(position, width, height, angle=angle, edgecolor=edge_color, facecolor=face_color, lw=lw, alpha=alpha)
+    ax.add_patch(ellipse)
+
+def em_algorithm(data, n_components):
+    gmm = GaussianMixture(n_components=n_components)
+    gmm.fit(data)
+    labels = gmm.predict(data)
+    return labels
 
 ############################################################################################
 bg = getBackground(cap)
@@ -278,8 +320,9 @@ while cap.isOpened():
         centroid = (int(x+(w/2)), int(y+(h/2)))   
         path_point = (int(x+(w/2)), int(y+h))  
 
-        # Updating heatmap
-        heatmap[path_point[1],path_point[0]] += 5  
+        # Updating heatmap and preventing index to be out of bounds
+        heatmap[min(path_point[1], heatmap.shape[0] - 1), min(path_point[0], heatmap.shape[1] - 1)] += 5
+        #heatmap[path_point[1],path_point[0]] += 5  
 
         # Remove bg from pedestrian bbox with mask from CCA
         ped = cv2.bitwise_and(img[y:y+h, x:x+w], img[y:y+h, x:x+w], mask=img_opn[y:y+h, x:x+w])
@@ -319,7 +362,8 @@ while cap.isOpened():
                     matched_track = track
                     min_distance = distance                  
                     
-            if matched_track is not None and min_distance < maxDistance:                
+            if matched_track is not None and min_distance < maxDistance:    
+
                 # Update the matched track with the current pedestrian
                 update_track(matched_track, roi, path_point)                
             else:
@@ -352,14 +396,15 @@ while cap.isOpened():
         # Show the current frame with the tracks, update heatmap
         for track in tracks:            
             id = track['id']
-            x, y, w, h = track['bbox']            
+            x, y, w, h = track['bbox']         
 
             cv2.rectangle(img_track, (x, y), (x+w, y+h), (0, 255, 0), 1)
-            cv2.putText(img_track, f"{id}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-            #cv2.polylines(img_track, [np.array(track['path'], dtype=np.int32).reshape((-1, 1, 2))], False, (0,0,255), 1)
             for c in track['path']:
-                cv2.circle(img_track, (c[0], c[1]), 2, (0,0,255), -1)              
+                cv2.circle(img_track, (c[0], c[1]), 2, (0,0,255), -1)
+
+            if len(track['path']) >= path_len:
+                trajectory = np.array(track['path'])[-path_len:]
+                trajectories.append(trajectory)              
 
 
         # Increase number of gt detections
@@ -373,7 +418,7 @@ while cap.isOpened():
 
             # Wrong detection - False positive
             else:
-                false_positives += 1
+                false_positives += 1                
 
             # Increase number of detections
             total_detections += 1
@@ -395,38 +440,56 @@ while cap.isOpened():
                 cv2.putText(img_track, str(int(bbox[1])), (int(bbox[2]+10), int(bbox[3]-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
         
         axes[0,0].images[0].set_data(cv2.cvtColor(img_track, cv2.COLOR_BGR2RGB))
-        #axes[0, 0].imshow(cv2.cvtColor(img_track, cv2.COLOR_BGR2RGB))
-        #axes[0, 0].set_title('Pedestrian tracking')
-        #cv2.imshow('Tracked image', img_track)
 
     # Display heatmap
     smoothed_heatmap = gaussian_filter(heatmap, sigma=6)
-    showHeatmap = (colormap(smoothed_heatmap) * 2**16).astype(np.uint16)[:,:,:3]
-    #showHeatmap = cv2.cvtColor(showHeatmap, cv2.COLOR_RGB2BGR)
+    showHeatmap = (colormap(smoothed_heatmap) * 2**32).astype(np.uint32)[:,:,:3]
     
-    axes[0,1].images[0].set_data(colormap(smoothed_heatmap))
-    #axes[0, 1].imshow(colormap(smoothed_heatmap))
-    #axes[0, 1].set_title('Pedestrian occupancy map')
-    # cv2.imshow('Heatmap', showHeatmap)
+    axes[1, 0].images[0].set_data(colormap(smoothed_heatmap))
 
     # Update the IoU plot
-    axes[1,0].clear()
-    axes[1,0].set_ylim(0,1)
-    axes[1,0].plot(iou_values, label='IoU')
-    axes[1,0].legend()
-    axes[1,0].set_xlabel('Frame')
-    axes[1,0].set_ylabel('IoU')
+    axes[1,1].clear()
+    axes[1,1].set_ylim(0,1)
 
-    # ax.clear()
-    # ax.set_ylim(0,1)
-    # ax.plot(iou_values, label='IoU')
-    # ax.legend()
-    # ax.set_xlabel('Frame')
-    # ax.set_ylabel('IoU')
-    # ax.set_title('Intersection over Union (IoU) per Frame')
-    plt.tight_layout()
-    plt.draw()
-    plt.pause(0.001)
+    # Select every 5 element in iou_values list
+    subset_iou_values = iou_values[::5]
+
+    # Get the x-axis values for the subset data points
+    x_values = list(range(0, len(iou_values), 5))
+
+    # Plot the subset values with the corresponding x-axis values
+    axes[1,1].plot(x_values, subset_iou_values, label='IoU')
+
+    axes[1,1].legend()
+    axes[1,1].set_xlabel('Frame')
+    axes[1,1].set_ylabel('IoU')
+    axes[1,1].set_title('Success plot')
+
+    # EM
+    # Add the following lines before the end of the main loop:
+    if frame % em_update_interval == 0 and len(trajectories) > 0:
+        trajectories_data = np.vstack(trajectories)
+        labels = em_algorithm(trajectories_data, n_components)
+
+        axes[0, 1].clear()
+        axes[0, 1].imshow(cv2.cvtColor(bg, cv2.COLOR_BGR2RGB))
+        axes[0, 1].set_title('Analysis of pedestrian trajectories')
+        
+        for i, label in enumerate(np.unique(labels)):
+            traj_data = trajectories_data[labels == label]
+            axes[0, 1].scatter(traj_data[:, 0], traj_data[:, 1], s=5, color=colormap(i / len(np.unique(labels))), label=f"Group {i + 1}")
+
+        axes[0, 1].set_xlim(0, width)
+        axes[0, 1].set_ylim(height, 0)
+        axes[0, 1].legend()
+        axes[0, 1].set_axis_off()
+
+
+    update_interval = 3
+    # Update the IoU plot only if the current frame is a multiple of update_interval
+    if frame % update_interval == 0:        
+        plt.draw()
+        plt.pause(0.001)
          
     #####################################
     frame += 1
@@ -439,4 +502,3 @@ cap.release()
 
 # Close the figure window
 plt.close(fig)
-#cv2.destroyAllWindows()
